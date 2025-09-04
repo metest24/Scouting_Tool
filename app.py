@@ -15,6 +15,7 @@ st.set_page_config(page_title="Passing Zone Tool", layout="wide")
 DEFAULT_FORMATIONS = ["Spread", "Bunch", "Trips", "Pre-BFA"]
 DEFAULT_RECEIVERS  = ["C","W1","S1","S2","QB"]
 DEFAULT_CAT = ["C","W1","S1","S2"]
+DEFAULT_DOWN = ["1st", "2nd", "3rd", "4th", "1xp", "2xp"]
 
 LAYOUT_FIELD = {
     "sections": [
@@ -52,74 +53,101 @@ LAYOUT_BFA = {
     ]
 }
 
+# -----------------------
 # Session State
+# -----------------------
 if "records" not in st.session_state:
-    st.session_state.records = []  # list of dicts: {timestamp, field_id, formation, receiver}
+    st.session_state.records = []  # list of dicts
+
 if "last_clicked_field" not in st.session_state:
     st.session_state.last_clicked_field = None
+
 if "formations" not in st.session_state:
     st.session_state.formations = DEFAULT_FORMATIONS.copy()
 if "selected_formation" not in st.session_state:
     st.session_state.selected_formation = None
+
 if "receivers" not in st.session_state:
     st.session_state.receivers = DEFAULT_RECEIVERS.copy()
 if "selected_receiver" not in st.session_state:
     st.session_state.selected_receiver = None
+
+if "downs" not in st.session_state:
+    st.session_state.downs = DEFAULT_DOWN.copy()
+if "selected_down" not in st.session_state:
+    st.session_state.selected_down = None
+
 if "layout" not in st.session_state:
     st.session_state.layout = LAYOUT_FIELD
 if "backfield" not in st.session_state:
     st.session_state.backfield = LAYOUT_BFA
 if "cat" not in st.session_state:
     st.session_state.cat = DEFAULT_CAT.copy()
-if "bfa_enabled" not in st.session_state:   
-    st.session_state.bfa_enabled = False    
-if "selected_cat" not in st.session_state:  
-    st.session_state.selected_cat = None    
-if "selected_bfa" not in st.session_state:  
-    st.session_state.selected_bfa = None    
+
+if "bfa_enabled" not in st.session_state:
+    st.session_state.bfa_enabled = False
+if "selected_cat" not in st.session_state:
+    st.session_state.selected_cat = None
+if "selected_bfa" not in st.session_state:
+    st.session_state.selected_bfa = None
 
 if "_excel_bytes" not in st.session_state:
     st.session_state._excel_bytes = None
 if "_pdf_bytes" not in st.session_state:
     st.session_state._pdf_bytes = None
 
+# Team-Namen für PDF
+if "team1_name" not in st.session_state:
+    st.session_state.team1_name = ""
+if "team2_name" not in st.session_state:
+    st.session_state.team2_name = ""
+
+# ---- Defaults sauber setzen
+def _ensure_defaults():
+    if st.session_state.selected_down is None and st.session_state.downs:
+        st.session_state.selected_down = st.session_state.downs[0]
+    if st.session_state.selected_formation is None and st.session_state.formations:
+        st.session_state.selected_formation = st.session_state.formations[0]
+    if st.session_state.selected_receiver is None and st.session_state.receivers:
+        st.session_state.selected_receiver = st.session_state.receivers[0]
+    if st.session_state.bfa_enabled:
+        if st.session_state.selected_cat is None and st.session_state.cat:
+            st.session_state.selected_cat = st.session_state.cat[0]
+        bfa_flat = [it for row in st.session_state.backfield.get("grid", []) for it in row]
+        if st.session_state.selected_bfa is None and bfa_flat:
+            st.session_state.selected_bfa = bfa_flat[0]
+
+_ensure_defaults()
+
 # -----------------------
 # Helpers & Caching
 # -----------------------
-def add_record(field_id, formation, receiver, backfield=None, cat=None):
+def add_record(field_id, formation, receiver, backfield=None, cat=None, down=None):
     st.session_state.records.append({
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "field_id": field_id,
         "formation": formation,
         "receiver": receiver,
         "backfield": backfield,
-        "cat": cat
+        "cat": cat,
+        "down": down
     })
-    # Exporte invalidieren, damit bewusst neu gebaut werden
+    # Exporte invalidieren
     st.session_state._excel_bytes = None
     st.session_state._pdf_bytes = None
 
 @st.cache_data(show_spinner=False)
 def compute_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """Formations-Tabelle: Gesamt + davon mit BFA (wirkt nach vorgelagertem Filter)."""
     if df.empty:
-        return pd.DataFrame(columns=["Formation", "Anzahl", "BFA-Anzahl"])
-    
-    # Summe Formations
+        return pd.DataFrame(columns=["Formation", "Gesamt Anzahl", "Davon mit BFA"])
     total_formation = df.groupby("formation").size()
-
-    # BFA-Only (nicht None/leer)
     counts_bfa = df[df["backfield"].notna() & (df["backfield"] != "")].groupby("formation").size()
-
-    # Zusammenführen
     result = pd.DataFrame({
         "Gesamt Anzahl": total_formation,
         "Davon mit BFA": counts_bfa
-    }).fillna(0).astype(int)
-
-    # Reset Index für hübsche Anzeige
-    result = result.reset_index().rename(columns={"formation": "Formation"})
+    }).fillna(0).astype(int).reset_index().rename(columns={"formation": "Formation"})
     return result
-
 
 @st.cache_data(show_spinner=False)
 def counts_by_field(df_filtered: pd.DataFrame) -> dict:
@@ -129,20 +157,17 @@ def counts_by_field(df_filtered: pd.DataFrame) -> dict:
     vc = df_filtered["field_id"].value_counts()
     return {k: int(v) for k, v in vc.items()}
 
-# Erstellt eine Heatmap-Figur mit Beschriftungen
+# Heatmap zeichnen
 def draw_heatmap(counts_matrix: np.ndarray, grid, title: str):
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
-    fig, ax = plt.subplots(figsize=(4.5, 4.5))  # quadratisch, gut für 3 nebeneinander
+    fig, ax = plt.subplots(figsize=(4.5, 4.5))
     im = ax.imshow(counts_matrix, aspect="equal")
-    ax.set_xticks(range(cols))
-    ax.set_yticks(range(rows))
+    ax.set_xticks(range(cols)); ax.set_yticks(range(rows))
     ax.set_xticklabels([str(c+1) for c in range(cols)])
     ax.set_yticklabels([str(r+1) for r in range(rows)])
-    ax.set_xlabel("Spalte")
-    ax.set_ylabel("Zeile")
+    ax.set_xlabel("Spalte"); ax.set_ylabel("Zeile")
     ax.set_title(title)
-    # Zellen beschriften
     for r in range(rows):
         for c in range(cols):
             fid = grid[r][c]
@@ -153,14 +178,16 @@ def draw_heatmap(counts_matrix: np.ndarray, grid, title: str):
     return fig, im
 
 # ===== PDF HELPERS =====
-def _filter_df_for_pdf(df, rx_sel, fx_sel):
-    """Filter nach Receivern/Formationen; None => kein Filter."""
+def _filter_df_for_pdf(df, rx_sel, fx_sel, dx_sel):
+    """Filter nach Receivern/Formationen/Downs; None/leer => kein Filter."""
     if df.empty:
         return df
     if rx_sel:
         df = df[df["receiver"].isin(rx_sel)]
     if fx_sel:
         df = df[df["formation"].isin(fx_sel)]
+    if dx_sel:
+        df = df[df["down"].isin(dx_sel)]
     return df
 
 def _render_pivot_table(ax, df_pivot):
@@ -168,11 +195,7 @@ def _render_pivot_table(ax, df_pivot):
     if df_pivot.empty:
         ax.text(0.5, 0.5, "Keine Daten", ha="center", va="center")
         return
-    table = ax.table(
-        cellText=df_pivot.values,
-        colLabels=df_pivot.columns,
-        loc="center"
-    )
+    table = ax.table(cellText=df_pivot.values, colLabels=df_pivot.columns, loc="center")
     table.auto_set_font_size(False)
     table.set_fontsize(8)
     table.scale(1, 1.2)
@@ -198,25 +221,21 @@ def _build_heatmaps_figure(df_filtered, section_list, selected_titles, bfa_row):
         return {k: int(v) for k, v in vc.items()}
     fc = _counts_by_field_loc(df_filtered)
 
-    # Auswahl Sektionen
     title_to_section = {s.get("title","Sektion"): s for s in section_list}
     chosen = [title_to_section[t] for t in selected_titles if t in title_to_section]
     n = min(3, len(chosen)) or 0
     if n == 0:
-        # leere Figure zurück
         fig = plt.figure(figsize=(11.69, 4.5))
         ax = fig.add_subplot(111)
         ax.axis("off")
         ax.text(0.5, 0.5, "Keine Sektion gewählt", ha="center", va="center")
         return fig
 
-    # globales vmax
     prepared = []
     vmax_global = 0
     for section in chosen[:3]:
         grid = section.get("grid", [])
-        rows = len(grid)
-        cols = len(grid[0]) if rows else 0
+        rows = len(grid); cols = len(grid[0]) if rows else 0
         counts = np.zeros((rows, cols), dtype=int)
         for r in range(rows):
             for c in range(cols):
@@ -239,7 +258,6 @@ def _build_heatmaps_figure(df_filtered, section_list, selected_titles, bfa_row):
             vmax_global = max(vmax_global, int(counts.max()))
             prepared.append((section.get("title",""), grid, counts))
 
-    # Plot
     fig, axes = plt.subplots(1, n, figsize=(11.69, 4.5))
     if n == 1:
         axes = [axes]
@@ -248,7 +266,6 @@ def _build_heatmaps_figure(df_filtered, section_list, selected_titles, bfa_row):
         im = ax.imshow(counts, aspect="equal", vmin=0)
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(title, fontsize=12)
-        # Labels
         rows = len(grid); cols = len(grid[0]) if rows else 0
         for r in range(rows):
             for c in range(cols):
@@ -259,7 +276,6 @@ def _build_heatmaps_figure(df_filtered, section_list, selected_titles, bfa_row):
         ims.append(im)
     for im in ims:
         im.set_clim(0, max(1, vmax_global))
-    # gemeinsame Farblegende
     if ims:
         cbar = fig.colorbar(ims[-1], ax=axes, fraction=0.03, pad=0.02)
         cbar.ax.set_ylabel("Anzahl", rotation=90)
@@ -267,15 +283,14 @@ def _build_heatmaps_figure(df_filtered, section_list, selected_titles, bfa_row):
     return fig
 
 def make_pdf_bytes(df_all_raw, *, title, include_pivot, include_bar, include_hm,
-                   rx_sel, fx_sel, hm_sections, hm_bfa_row, section_list):
+                   rx_sel, fx_sel, dx_sel, hm_sections, hm_bfa_row, section_list):
     import matplotlib.backends.backend_pdf as pdf_backend
-    # Filter anwenden
-    df_filtered = _filter_df_for_pdf(df_all_raw.copy(), rx_sel, fx_sel)
+    df_filtered = _filter_df_for_pdf(df_all_raw.copy(), rx_sel, fx_sel, dx_sel)
 
     pdf_buf = io.BytesIO()
     pdf = pdf_backend.PdfPages(pdf_buf)
 
-    # Seite 1: Titel + Pivot/Bar
+    # Seite 1
     if include_pivot or include_bar:
         fig1 = plt.figure(figsize=(11.69, 8.27))  # A4 quer
         fig1.suptitle(title or "Passing Matrix – Report", fontsize=16, y=0.98)
@@ -287,12 +302,9 @@ def make_pdf_bytes(df_all_raw, *, title, include_pivot, include_bar, include_hm,
             ax_bar   = fig1.add_subplot(gs[1, 1])
             ax_info  = fig1.add_subplot(gs[1, 0])
             ax_info.axis("off")
-            # Pivot (Formation / BFA)
             piv = compute_pivot(df_filtered)
             _render_pivot_table(ax_table, piv)
-            # Bar (Receiver)
             _render_receiver_bar(ax_bar, df_filtered)
-            # Info
             lines = [
                 f"Erstellt: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 f"Einträge (gefiltert): {len(df_filtered)}",
@@ -310,7 +322,7 @@ def make_pdf_bytes(df_all_raw, *, title, include_pivot, include_bar, include_hm,
         pdf.savefig(fig1)
         plt.close(fig1)
 
-    # Seite 2: Heatmaps (optional)
+    # Seite 2
     if include_hm:
         fig2 = _build_heatmaps_figure(
             df_filtered,
@@ -330,26 +342,24 @@ def make_pdf_bytes(df_all_raw, *, title, include_pivot, include_bar, include_hm,
 # Sidebar (ganz Links)
 # -----------------------
 st.sidebar.header("⚙️ Aktionen")
-if st.sidebar.button("🗑️ Alle Einträge löschen"):
+if st.sidebar.button("🗑️ Alle Einträge löschen", type="secondary", key="btn_clear_all", help="Alle gespeicherten Einträge verwerfen."):
     st.session_state.records = []
     st.session_state.last_clicked_field = None
     st.session_state.selected_formation = None
     st.session_state.selected_receiver = None
+    st.session_state.selected_down = None
     st.session_state._excel_bytes = None
     st.session_state._pdf_bytes = None
     st.sidebar.success("Zurückgesetzt.")
 
-#if st.sidebar.button("🛑 Server beenden"):
-#    os.kill(os.getpid(), signal.SIGTERM) 
-if st.sidebar.button("↩️ Letzten Eintrag löschen"):
+if st.sidebar.button("↩️ Letzten Eintrag löschen", type="secondary", key="btn_clear_last", help="Nur den letzten Eintrag entfernen."):
     if st.session_state.records:
         removed = st.session_state.records.pop(-1)
-        st.sidebar.success(f"Letzter Eintrag gelöscht!")
+        st.sidebar.success("Letzter Eintrag gelöscht!")
         st.session_state._excel_bytes = None
         st.session_state._pdf_bytes = None
     else:
         st.sidebar.warning("Keine Einträge zum Löschen vorhanden.")
-
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📤 Export")
@@ -358,25 +368,30 @@ st.sidebar.subheader("📤 Export")
 @st.dialog("PDF-Export konfigurieren")
 def pdf_export_dialog():
     with st.form("pdf_dialog_form", clear_on_submit=False):
-        st.markdown("**Allgemein**")
-        report_title = st.text_input("Titel", value="Passing Matrix – Report")
+        st.markdown("**Teams**")
+        team1 = st.text_input("Team 1:", value=st.session_state.team1_name, key="pdf_team1_input")
+        team2 = st.text_input("Team 2:", value=st.session_state.team2_name, key="pdf_team2_input")
+
+        auto_title = (team1.strip() != "" and team2.strip() != "")
+        suggested_title = f'{team1.strip()} gg. {team2.strip()} Livescouting' if auto_title else "Passing Matrix – Report"
+
+        st.markdown("**Titel**")
+        report_title = st.text_input(
+            "PDF-Titel:",
+            value=suggested_title,
+            key="pdf_title_input",
+            help="Wenn beide Teamnamen gesetzt sind, wird automatisch 'Team1 gg. Team2 Livescouting' vorgeschlagen."
+        )
 
         st.markdown("**Inhalte auswählen**")
         include_pivot = st.checkbox("Tabelle: Formationen & BFA", value=True)
         include_bar   = st.checkbox("Balkendiagramm: Catches pro Receiver", value=True)
         include_hm    = st.checkbox("Heatmaps (3 Sektionen)", value=True)
 
-        st.markdown("**Filter für die Heatmaps**")
-        rx_sel = st.multiselect(
-            "Receiver filtern",
-            options=st.session_state.receivers,
-            default=st.session_state.receivers
-        )
-        fx_sel = st.multiselect(
-            "Formationen filtern",
-            options=st.session_state.formations,
-            default=st.session_state.formations
-        )
+        st.markdown("**Filter**")
+        rx_sel = st.multiselect("Receiver filtern", options=st.session_state.receivers, default=st.session_state.receivers)
+        fx_sel = st.multiselect("Formationen filtern", options=st.session_state.formations, default=st.session_state.formations)
+        dx_sel = st.multiselect("Downs filtern", options=st.session_state.downs, default=st.session_state.downs)
 
         st.markdown("**Heatmap-Optionen**")
         section_list = st.session_state.layout.get("sections", [])
@@ -385,11 +400,17 @@ def pdf_export_dialog():
         hm_sections = st.multiselect("Sektionen (max. 3)", options=section_titles, default=default_sel)
         hm_bfa_row  = st.checkbox("BFA-Zeile in Heatmaps anzeigen (BFA-1/2/3)", value=False)
 
-        create = st.form_submit_button("PDF erstellen", use_container_width=True)
+        create = st.form_submit_button("PDF erstellen", type="primary", use_container_width=False)  # Streamlit <=1.39
+        # Wenn du >=1.40 bist: replace use_container_width=False mit width="content"
 
     if create:
+        # Teams persistieren
+        st.session_state.team1_name = team1
+        st.session_state.team2_name = team2
+
         df_all_raw = pd.DataFrame(st.session_state.records) if st.session_state.records else \
-            pd.DataFrame(columns=["timestamp","field_id","formation","receiver","backfield","cat"])
+            pd.DataFrame(columns=["timestamp","field_id","formation","receiver","backfield","cat","down"])
+
         bytes_pdf = make_pdf_bytes(
             df_all_raw,
             title=report_title,
@@ -398,6 +419,7 @@ def pdf_export_dialog():
             include_hm=include_hm,
             rx_sel=rx_sel,
             fx_sel=fx_sel,
+            dx_sel=dx_sel,
             hm_sections=hm_sections,
             hm_bfa_row=hm_bfa_row,
             section_list=section_list
@@ -409,13 +431,16 @@ def pdf_export_dialog():
             data=bytes_pdf,
             file_name="passing_matrix_report.pdf",
             mime="application/pdf",
-            use_container_width=True
+            width="stretch"
         )
-        # UND zusätzlich im Sidebar verfügbar machen:
-        st.session_state._pdf_bytes = bytes_pdf
+        # Sidebar-Download sichtbar machen:
+        try:
+            st.rerun()
+        except AttributeError:
+            st.experimental_rerun()
 
 # Button, um den Dialog zu öffnen
-if st.sidebar.button("🧾 PDF exportieren…"):
+if st.sidebar.button("🧾 PDF exportieren…", type="primary"):
     pdf_export_dialog()
 
 # Download PDF (falls vorhanden)
@@ -425,21 +450,19 @@ if st.session_state._pdf_bytes:
         data=st.session_state._pdf_bytes,
         file_name="passing_matrix_report.pdf",
         mime="application/pdf",
-        use_container_width=True
+        width="stretch"
     )
 
 # --- Excel-Konfiguration & Export ---
-
-with st.sidebar.expander("Excel-Export"):
+with st.sidebar.expander("Excel-Export", expanded=False):
     with st.form("xlsx_export_form", clear_on_submit=False):
         st.markdown("**Welche Blätter sollen rein?**")
         inc_entries = st.checkbox("Rohdaten (Eintraege)", value=True)
-
-        make_xlsx = st.form_submit_button("Export starten", use_container_width=True)
+        make_xlsx = st.form_submit_button("Export starten", type="primary")
 
     if make_xlsx:
         df_all_raw = pd.DataFrame(st.session_state.records) if st.session_state.records else \
-                        pd.DataFrame(columns=["timestamp","field_id","formation","receiver","backfield","cat"])
+            pd.DataFrame(columns=["timestamp","field_id","formation","receiver","backfield","cat","down"])
         df_out = df_all_raw.copy()
 
         excel_buffer = io.BytesIO()
@@ -456,9 +479,8 @@ if st.session_state._excel_bytes:
         data=st.session_state._excel_bytes,
         file_name="passing_matrix_export.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        width="stretch"
     )
-
 
 # -----------------------
 # Hauptlayout: 3 Spalten
@@ -471,7 +493,7 @@ def _select_field(fid: str):
 
 with left:
     st.subheader("1) Feld wählen")
-    st.caption("Klicke zuerst ein Feld. Danach wähle Empfänger & Formation und speichere.")
+    st.caption("Klicke zuerst ein Feld. Danach wähle Down, Formation & Receiver und speichere.")
 
     for section in st.session_state.layout.get("sections", []):
         st.markdown(f"**{section.get('title','')}**")
@@ -487,35 +509,42 @@ with left:
                     fid,
                     key=f"btn_{fid}",
                     type=btn_type,
-                    use_container_width=True,
+                    width="stretch",
                     on_click=_select_field,
                     args=(fid,)
                 )
 
-
-# ---- Mid: Formation, Empfänger, Speichern
+# ---- Mid: Down, Formation, Empfänger, Speichern
 with mid:
-    st.subheader("2) Formation & Receiver")
-    st.caption("Wähle Formation & Receiver und speichere den Eintrag. Sollte es eine Back-Field Action geben, aktiviere BFA.")
+    st.subheader("2) Down, Formation & Receiver")
+    st.caption("Wähle Down, Formation & Receiver und speichere den Eintrag. Falls es eine Back-Field Action gibt, aktiviere BFA.")
     st.checkbox("BFA aktivieren", key="bfa_enabled")
-    # Falls BFA gerade neu aktiviert wurde, Defaults setzen
-    #_ensure_defaults()
+    _ensure_defaults()
 
-    # --- Formular (Widgets mit stabilen Keys, lesen/setzen aus Session-State)
     with st.form("entry_form", clear_on_submit=False):
+        downs      = st.session_state.downs
         formations = st.session_state.formations
         receivers  = st.session_state.receivers
 
-        # Formation (persistente Auswahl)
+        # Down
+        st.radio(
+            "Down",
+            downs,
+            index=downs.index(st.session_state.selected_down) if st.session_state.selected_down in downs else 0,
+            key="down_radio",
+            horizontal=True
+        )
+
+        # Formation
         st.radio(
             "Formation",
             formations,
             index=formations.index(st.session_state.selected_formation) if st.session_state.selected_formation in formations else 0,
-            key="formation_radio",  # eigener Key fürs Widget
+            key="formation_radio",
             horizontal=True
         )
 
-        # Receiver (persistente Auswahl)
+        # Receiver
         st.radio(
             "Receiver",
             receivers,
@@ -523,10 +552,9 @@ with mid:
             key="receiver_radio",
             horizontal=True
         )
+
         st.markdown("---")
-        #st.checkbox("BFA aktivieren", key="bfa_enabled")
-        # BFA-Details nur anzeigen, wenn aktiviert — innerhalb des Formulars,
-        # aber die Checkbox war außerhalb, d.h. sie triggert das Aufklappen sofort.
+
         if st.session_state.bfa_enabled:
             st.markdown("**BFA Details**")
             cats = st.session_state.cat
@@ -548,12 +576,12 @@ with mid:
 
         submitted = st.form_submit_button(
             "✅ Eintrag speichern",
-            use_container_width=True,
+            type="primary",
             disabled=(st.session_state.last_clicked_field is None)
         )
 
-    # --- Nach Submit: Werte aus den Widget-Keys zurück in deine "selected_*" States spiegeln
     if submitted:
+        st.session_state.selected_down      = st.session_state.get("down_radio")
         st.session_state.selected_formation = st.session_state.get("formation_radio")
         st.session_state.selected_receiver  = st.session_state.get("receiver_radio")
 
@@ -565,26 +593,26 @@ with mid:
                 st.session_state.selected_formation,
                 st.session_state.selected_receiver,
                 backfield=st.session_state.selected_bfa,
-                cat=st.session_state.selected_cat
+                cat=st.session_state.selected_cat,
+                down=st.session_state.selected_down
             )
         else:
-            # wenn BFA aus, nichts mitschreiben
             add_record(
                 st.session_state.last_clicked_field,
                 st.session_state.selected_formation,
                 st.session_state.selected_receiver,
                 backfield=None,
-                cat=None
+                cat=None,
+                down=st.session_state.selected_down
             )
 
         st.success(
             f"Gespeichert: {st.session_state.selected_receiver} in {st.session_state.last_clicked_field} "
-            f"({st.session_state.selected_formation})"
+            f"({st.session_state.selected_formation}, {st.session_state.selected_down})"
             + (f" | {st.session_state.selected_bfa} mit {st.session_state.selected_cat} als Cat"
                if st.session_state.bfa_enabled else "")
         )
 
-    # (Optional) kleine Live-Anzeige der letzten 3
     if st.session_state.records:
         df_all_raw = pd.DataFrame(st.session_state.records)
         st.markdown("---")
@@ -593,30 +621,25 @@ with mid:
     else:
         st.caption("Noch keine Einträge.")
 
-
-# ---- Right: Übersicht (live) – Statistik über ALLE Einträge (ungefiltert)
+# ---- Right: Übersicht (live)
 with right:
     st.subheader("Übersicht (live)")
     if st.session_state.records:
         df_all_raw = pd.DataFrame(st.session_state.records)
-        pivot_all = compute_pivot(df_all_raw)  # -> Spalten: Formation | Anzahl | BFA-Anzahl
-
+        pivot_all = compute_pivot(df_all_raw)
         if not pivot_all.empty:
-            st.markdown("**Anzahl der Formationen**")
+            st.markdown("**Anzahl der Formationen (davon BFA)**")
             st.dataframe(pivot_all, use_container_width=True, hide_index=True)
         else:
             st.caption("Noch keine Daten für Pivot.")
         
         st.markdown("---")
 
-        # --- Balken: Catches pro Receiver (WR) ---
-        # Reihenfolge der Balken wie in deiner Receiver-Liste
+        # Balken: Catches pro Receiver (WR)
         wr_order = st.session_state.receivers if "receivers" in st.session_state else None
         wr_counts = df_all_raw.groupby("receiver").size()
-
         if wr_order:
             wr_counts = wr_counts.reindex(wr_order, fill_value=0)
-
         wr_counts = wr_counts.reset_index()
         wr_counts.columns = ["receiver", "count"]
 
@@ -631,9 +654,9 @@ with right:
             plt.close(fig_wr)
         else:
             st.caption("Noch keine Catches erfasst.")
-
     else:
         st.caption("Die Übersicht erscheint, sobald Einträge vorhanden sind.")
+
 # -----------------------
 # Heatmaps (nebeneinander, mit optionalen Filtern)
 # -----------------------
@@ -642,7 +665,8 @@ st.subheader("Heatmaps")
 
 receiver_filter = None
 formation_filter = None
-bfa_row_enabled = False  # NEW
+down_filter = None
+bfa_row_enabled = False
 
 if st.session_state.records:
     with st.expander("Filter (optional)", expanded=False):
@@ -668,7 +692,17 @@ if st.session_state.records:
             else None
         )
 
-        # NEW: BFA-Zeile ein-/ausblenden
+        selected_downs = st.multiselect(
+            "Nach Downs filtern",
+            options=st.session_state.downs,
+            default=st.session_state.downs
+        )
+        down_filter = (
+            selected_downs
+            if selected_downs and len(selected_downs) < len(st.session_state.downs)
+            else None
+        )
+
         bfa_row_enabled = st.checkbox("BFA-Zeile anzeigen (BFA-1/2/3)", value=False, key="hm_bfa_enabled")
 
 # gefiltertes DF für Heatmaps
@@ -678,15 +712,17 @@ if st.session_state.records:
         df_all = df_all[df_all["receiver"].isin(receiver_filter)]
     if formation_filter:
         df_all = df_all[df_all["formation"].isin(formation_filter)]
+    if down_filter:
+        df_all = df_all[df_all["down"].isin(down_filter)]
 else:
-    df_all = pd.DataFrame(columns=["timestamp","field_id","receiver","formation","backfield","cat"])
+    df_all = pd.DataFrame(columns=["timestamp","field_id","receiver","formation","backfield","cat","down"])
 
 # schnelle Zählung pro Feld (nach Filtern)
 field_counts = counts_by_field(df_all)
 
-# drei Heatmaps nebeneinander – zuerst vorbereiten, dann globales vmax bestimmen
+# drei Heatmaps nebeneinander – vorbereiten, globales vmax bestimmen
 sections = st.session_state.layout.get("sections", [])
-prepared = []  # Liste von Dicts: {"title", "grid", "counts"}
+prepared = []
 vmax_global = 0
 
 for section in sections[:3]:
@@ -699,7 +735,6 @@ for section in sections[:3]:
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
-    # Basis-Counts pro Feld (wie bisher)
     counts = np.zeros((rows, cols), dtype=int)
     for r in range(rows):
         for c in range(cols):
@@ -710,21 +745,15 @@ for section in sections[:3]:
                 counts[r, c] = field_counts.get(fid, 0)
 
     if bfa_row_enabled:
-        # Feld-IDs dieser Sektion ermitteln
         section_fids = [cell for row in grid for cell in row if cell not in (None, "", "-")]
         df_sec = df_all[df_all["field_id"].isin(section_fids)]
-
-        # BFA-Counts je Sektion
         bfa_labels = ["BFA-1", "BFA-2", "BFA-3"]
         bfa_counts = [
             int((df_sec["backfield"] == lab).sum()) if not df_sec.empty else 0
             for lab in bfa_labels
         ]
-
-        # Matrix & Grid erweitern
         counts_ext = np.vstack([counts, np.array(bfa_counts).reshape(1, 3)])
         grid_ext = grid + [bfa_labels]
-
         vmax_global = max(vmax_global, int(counts_ext.max()))
         prepared.append({"title": title, "grid": grid_ext, "counts": counts_ext})
     else:
@@ -743,18 +772,14 @@ for i, sec in enumerate(prepared[:3]):
             st.caption("Kein Grid definiert.")
             continue
 
-        # Bestehende draw_heatmap nutzen und danach die Skala vereinheitlichen
         fig_hm, im_hm = draw_heatmap(counts, grid, title)
-        # einheitliche Farbskala:
         im_hm.set_clim(0, max(1, vmax_global))
-
-
         st.pyplot(fig_hm, use_container_width=True)
         plt.close(fig_hm)
 
-
-
 # Footer
 st.markdown("---")
-st.caption("Passing Zone Tool \n Ver. 0.2 ")
-
+if st.session_state.team1_name and st.session_state.team2_name:
+    st.caption(f"Passing Zone Tool – {st.session_state.team1_name} gg. {st.session_state.team2_name} – Ver. 0.3")
+else:
+    st.caption("Passing Zone Tool – Ver. 0.3")
